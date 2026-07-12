@@ -100,6 +100,9 @@ pixCtx.imageSmoothingEnabled = true;
 const panelCanvas = document.createElement('canvas');
 const panelCtx = panelCanvas.getContext('2d');
 
+const redCanvas = document.createElement('canvas');
+const redCtx = redCanvas.getContext('2d');
+
 function resize() {
   W = window.innerWidth; H = window.innerHeight;
   canvas.width = W; canvas.height = H;
@@ -138,6 +141,31 @@ function canvasToVideo(pt) {
   return { x: (pt.x - ox) / scale, y: (pt.y - oy) / scale };
 }
 
+// standard 2D segment intersection: returns {x,y} if segments p1-p2 and p3-p4
+// cross within both segments, otherwise null
+function segIntersect(p1, p2, p3, p4) {
+  const d1x = p2.x - p1.x, d1y = p2.y - p1.y;
+  const d2x = p4.x - p3.x, d2y = p4.y - p3.y;
+  const denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) < 1e-6) return null;
+  const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
+  const u = ((p3.x - p1.x) * d1y - (p3.y - p1.y) * d1x) / denom;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return { x: p1.x + t * d1x, y: p1.y + t * d1y };
+}
+
+function clipTriangleAndDraw(tri, img, minX, minY, boxW, boxH) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(tri[0].x, tri[0].y);
+  ctx.lineTo(tri[1].x, tri[1].y);
+  ctx.lineTo(tri[2].x, tri[2].y);
+  ctx.closePath();
+  ctx.clip();
+  ctx.drawImage(img, minX, minY, boxW, boxH);
+  ctx.restore();
+}
+
 function drawGlitchPanel(corners) {
   const xs = corners.map(c => c.x), ys = corners.map(c => c.y);
   const minX = Math.max(0, Math.min(...xs)), maxX = Math.min(W, Math.max(...xs));
@@ -164,6 +192,24 @@ function drawGlitchPanel(corners) {
   panelCtx.fillStyle = '#000000';
   panelCtx.fillRect(0, 0, boxW, boxH);
   panelCtx.globalCompositeOperation = 'source-over';
+
+  // red-tinted "back of panel" version — same pixelated frame, tinted red
+  redCanvas.width = boxW; redCanvas.height = boxH;
+  redCtx.imageSmoothingEnabled = false;
+  redCtx.clearRect(0, 0, boxW, boxH);
+  redCtx.filter = 'grayscale(1) contrast(1.7) brightness(1.15)';
+  redCtx.drawImage(pixCanvas, 0, 0, boxW, boxH);
+  redCtx.filter = 'none';
+  redCtx.globalCompositeOperation = 'destination-over';
+  redCtx.fillStyle = '#000000';
+  redCtx.fillRect(0, 0, boxW, boxH);
+  redCtx.globalCompositeOperation = 'multiply';
+  redCtx.fillStyle = '#ff1414';
+  redCtx.fillRect(0, 0, boxW, boxH);
+  redCtx.globalCompositeOperation = 'screen';
+  redCtx.fillStyle = 'rgba(255,20,20,0.45)';
+  redCtx.fillRect(0, 0, boxW, boxH);
+  redCtx.globalCompositeOperation = 'source-over';
 
   const sliceH = Math.max(2, boxH / PIX_ROWS);
   for (let row = 0; row < PIX_ROWS; row++) {
@@ -197,14 +243,35 @@ function drawGlitchPanel(corners) {
     panelCtx.beginPath(); panelCtx.moveTo(0, y); panelCtx.lineTo(boxW, y); panelCtx.stroke();
   }
 
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(corners[0].x, corners[0].y);
-  for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
-  ctx.closePath();
-  ctx.clip();
-  ctx.drawImage(panelCanvas, minX, minY, boxW, boxH);
-  ctx.restore();
+  // corners = [A(topLeft/left-index), B(topRight/right-index), C(bottomRight/right-thumb), D(bottomLeft/left-thumb)]
+  const [A, B, C, D] = corners;
+  const leftFlipped = A.y > D.y;   // left hand's index is below its thumb -> flipped
+  const rightFlipped = B.y > C.y;  // right hand's index is below its thumb -> flipped
+
+  let drewSplit = false;
+  if (leftFlipped !== rightFlipped) {
+    // exactly one hand is flipped -> the quad self-intersects into a bowtie.
+    // find where the index-index edge (AB) crosses the thumb-thumb edge (CD)
+    const P = segIntersect(A, B, C, D);
+    if (P) {
+      const backTri = leftFlipped ? [A, P, D] : [B, P, C];
+      const frontTri = leftFlipped ? [P, B, C] : [A, P, D];
+      clipTriangleAndDraw(frontTri, panelCanvas, minX, minY, boxW, boxH);
+      clipTriangleAndDraw(backTri, redCanvas, minX, minY, boxW, boxH);
+      drewSplit = true;
+    }
+  }
+
+  if (!drewSplit) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x, corners[0].y);
+    for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(panelCanvas, minX, minY, boxW, boxH);
+    ctx.restore();
+  }
 
   ctx.save();
   ctx.beginPath();
