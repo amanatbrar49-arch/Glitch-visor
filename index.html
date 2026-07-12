@@ -75,7 +75,7 @@
   <div>HANDS: <span id="ui-hands">0</span></div>
   <div>PANEL: <span id="ui-panel">SEARCHING</span></div>
 </div>
-<div class="hint" id="hint">pinch thumb + index apart / together to resize the visor</div>
+<div class="hint" id="hint">index fingers = top corners · thumbs = bottom corners</div>
 
 <script>
 const video = document.getElementById('video');
@@ -91,8 +91,8 @@ let W = window.innerWidth, H = window.innerHeight;
 let currentHands = [];
 let time = 0, lastT = performance.now();
 
-// low-res buffer for pixelation sampling
-const PIX_COLS = 44, PIX_ROWS = 16;
+// low-res buffer for pixelation sampling (higher res = more recognizable face underneath)
+const PIX_COLS = 90, PIX_ROWS = 34;
 const pixCanvas = document.createElement('canvas');
 pixCanvas.width = PIX_COLS; pixCanvas.height = PIX_ROWS;
 const pixCtx = pixCanvas.getContext('2d');
@@ -151,43 +151,40 @@ function drawGlitchPanel(corners) {
   panelCtx.clearRect(0, 0, boxW, boxH);
   panelCtx.drawImage(pixCanvas, 0, 0, boxW, boxH);
 
-  // desaturate + blue tint
-  panelCtx.globalCompositeOperation = 'saturation';
-  panelCtx.fillStyle = 'rgba(0,0,0,1)';
-  panelCtx.fillRect(0, 0, boxW, boxH);
+  // subtle blue tint (kept translucent so the face underneath stays recognizable)
   panelCtx.globalCompositeOperation = 'multiply';
-  panelCtx.fillStyle = '#1c2ecf';
+  panelCtx.fillStyle = 'rgba(60,90,235,0.5)';
   panelCtx.fillRect(0, 0, boxW, boxH);
   panelCtx.globalCompositeOperation = 'screen';
-  panelCtx.fillStyle = 'rgba(30,60,255,0.35)';
+  panelCtx.fillStyle = 'rgba(40,70,255,0.18)';
   panelCtx.fillRect(0, 0, boxW, boxH);
   panelCtx.globalCompositeOperation = 'source-over';
 
-  // scanline / horizontal slice glitch
+  // scanline / horizontal slice glitch (sparser, so it reads as glitch rather than noise soup)
   const sliceH = Math.max(2, boxH / PIX_ROWS);
   for (let row = 0; row < PIX_ROWS; row++) {
-    if (Math.random() > 0.82) {
+    if (Math.random() > 0.93) {
       const y = row * sliceH;
-      const shift = (Math.random() - 0.5) * boxW * 0.12;
+      const shift = (Math.random() - 0.5) * boxW * 0.08;
       const sliceImg = panelCtx.getImageData(0, y, boxW, sliceH);
       panelCtx.putImageData(sliceImg, shift, y);
     }
   }
 
-  // random noise blocks (white / magenta / cyan pixels)
-  const blockCount = 10 + Math.floor(Math.random() * 10);
+  // random noise blocks (white / magenta / cyan pixels) — light dusting, not a full overlay
+  const blockCount = 6 + Math.floor(Math.random() * 6);
   for (let i = 0; i < blockCount; i++) {
-    const bw = 3 + Math.random() * 6, bh = 3 + Math.random() * 6;
+    const bw = 2 + Math.random() * 4, bh = 2 + Math.random() * 4;
     const bx = Math.random() * (boxW - bw), by = Math.random() * (boxH - bh);
     const r = Math.random();
-    panelCtx.fillStyle = r < 0.5 ? 'rgba(255,255,255,0.85)' : (r < 0.8 ? 'rgba(255,60,220,0.8)' : 'rgba(60,255,240,0.8)');
+    panelCtx.fillStyle = r < 0.5 ? 'rgba(255,255,255,0.6)' : (r < 0.8 ? 'rgba(255,60,220,0.55)' : 'rgba(60,255,240,0.55)');
     panelCtx.fillRect(bx, by, bw, bh);
   }
 
   // faint scanline grid overlay
-  panelCtx.strokeStyle = 'rgba(120,150,255,0.15)';
+  panelCtx.strokeStyle = 'rgba(120,150,255,0.1)';
   panelCtx.lineWidth = 1;
-  for (let y = 0; y < boxH; y += 4) {
+  for (let y = 0; y < boxH; y += 5) {
     panelCtx.beginPath(); panelCtx.moveTo(0, y); panelCtx.lineTo(boxW, y); panelCtx.stroke();
   }
 
@@ -271,31 +268,11 @@ function loop(ts) {
     const left = wrist1.x < wrist2.x ? h1 : h2;
     const right = wrist1.x < wrist2.x ? h2 : h1;
 
-    // anchor each hand's corner at the midpoint between thumb tip (4) and index tip (8)
-    const pinchPoint = (hand) => {
-      const t = toCanvas(hand[4]), i = toCanvas(hand[8]);
-      return { x: (t.x + i.x) / 2, y: (t.y + i.y) / 2 };
-    };
-    const lw = pinchPoint(left), rw = pinchPoint(right);
-
-    // "up" direction estimated from wrist -> middle-finger-MCP (landmark 9) for each hand, averaged
-    const upVecFor = (hand) => {
-      const w = toCanvas(hand[0]), m = toCanvas(hand[9]);
-      const dx = w.x - m.x, dy = w.y - m.y; // reversed: points "up" from wrist through hand
-      const len = Math.hypot(dx, dy) || 1;
-      return { x: dx / len, y: dy / len };
-    };
-    const u1 = upVecFor(left), u2 = upVecFor(right);
-    const up = { x: (u1.x + u2.x) / 2, y: (u1.y + u2.y) / 2 };
-    const upLen = Math.hypot(up.x, up.y) || 1;
-    up.x /= upLen; up.y /= upLen;
-
-    const panelWidth = Math.hypot(rw.x - lw.x, rw.y - lw.y);
-    const panelHeight = Math.min(Math.max(panelWidth * 0.32, 60), 260);
-
-    const bottomLeft = lw, bottomRight = rw;
-    const topLeft = { x: lw.x + up.x * panelHeight, y: lw.y + up.y * panelHeight };
-    const topRight = { x: rw.x + up.x * panelHeight, y: rw.y + up.y * panelHeight };
+    // corners come straight from fingertips: index tip = top corner, thumb tip = bottom corner
+    const topLeft = toCanvas(left[8]);
+    const topRight = toCanvas(right[8]);
+    const bottomRight = toCanvas(right[4]);
+    const bottomLeft = toCanvas(left[4]);
 
     drawGlitchPanel([topLeft, topRight, bottomRight, bottomLeft]);
 
