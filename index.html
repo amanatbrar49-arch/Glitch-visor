@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Glitch Visor AR</title>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { width:100%; height:100%; background:#000; overflow:hidden; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+
+  .stage { position:absolute; inset:0; width:100vw; height:100vh; }
+
+  video, canvas {
+    position:absolute; top:0; left:0;
+    width:100%; height:100%;
+    object-fit:cover;
+    transform:scaleX(-1); /* mirror for selfie view */
+  }
+  video { z-index:0; }
+  #overlay { z-index:5; pointer-events:none; }
+
+  #hud {
+    position:absolute; top:16px; left:16px; z-index:10;
+    background:rgba(10,15,30,0.45);
+    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+    border:1px solid rgba(255,255,255,0.15);
+    border-radius:10px; padding:10px 14px;
+    color:#fff; font-size:12px; letter-spacing:0.5px;
+    opacity:0; transition:opacity .4s;
+  }
+  #hud div { margin-bottom:3px; color:rgba(255,255,255,0.75); }
+  #hud span { color:#4dfcff; font-weight:600; }
+
+  #startOverlay {
+    position:absolute; inset:0; z-index:100;
+    background:radial-gradient(circle at 50% 40%, #101830 0%, #05060c 80%);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    text-align:center; padding:30px; transition:opacity .5s ease;
+  }
+  #startOverlay h1 {
+    color:#fff; font-weight:300; letter-spacing:5px; font-size:1.4rem; margin-bottom:10px;
+    text-shadow:0 0 20px #3b6cff;
+  }
+  #startOverlay p { color:#8a92ab; font-size:0.9rem; margin-bottom:36px; max-width:280px; }
+  .start-btn {
+    padding:16px 42px; font-size:1rem; font-weight:700; letter-spacing:2px;
+    text-transform:uppercase; color:#fff; border:none; border-radius:32px; cursor:pointer;
+    background:linear-gradient(45deg,#ff2fd0,#3b6cff);
+    box-shadow:0 0 30px rgba(90,80,255,0.5);
+  }
+  .hint { position:absolute; bottom:26px; left:50%; transform:translateX(-50%); z-index:10;
+    color:rgba(255,255,255,0.6); font-size:12px; text-align:center; opacity:0; transition:opacity .4s; }
+  .hidden { opacity:0 !important; pointer-events:none; }
+</style>
+</head>
+<body>
+
+<div id="startOverlay">
+  <h1>GLITCH VISOR</h1>
+  <p>Raise both hands into frame with palms facing you. Grant camera access to begin.</p>
+  <button class="start-btn" id="startBtn">Enter</button>
+</div>
+
+<div class="stage">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<div id="hud">
+  <div>HANDS: <span id="ui-hands">0</span></div>
+  <div>PANEL: <span id="ui-panel">SEARCHING</span></div>
+</div>
+<div class="hint" id="hint">move your wrists apart / together to resize the visor</div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+
+const uiHands = document.getElementById('ui-hands');
+const uiPanel = document.getElementById('ui-panel');
+const hud = document.getElementById('hud');
+const hint = document.getElementById('hint');
+
+let W = window.innerWidth, H = window.innerHeight;
+let currentHands = [];
+let time = 0, lastT = performance.now();
+
+// low-res buffer for pixelation sampling
+const PIX_COLS = 44, PIX_ROWS = 16;
+const pixCanvas = document.createElement('canvas');
+pixCanvas.width = PIX_COLS; pixCanvas.height = PIX_ROWS;
+const pixCtx = pixCanvas.getContext('2d');
+pixCtx.imageSmoothingEnabled = true;
+
+// scratch canvas for the panel content before clipping
+const panelCanvas = document.createElement('canvas');
+const panelCtx = panelCanvas.getContext('2d');
+
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W; canvas.height = H;
+}
+window.addEventListener('resize', resize);
+resize();
+
+document.getElementById('startBtn').addEventListener('click', async () => {
+  document.getElementById('startOverlay').classList.add('hidden');
+  hud.style.opacity = 1;
+  hint.style.opacity = 1;
+  await initMediaPipe();
+  requestAnimationFrame(loop);
+});
+
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function toCanvas(p) { return { x: p.x * W, y: p.y * H }; }
+
+// map a canvas-space point to the actual source pixel coords inside the
+// <video> element, accounting for object-fit:cover scaling/cropping
+function canvasToVideo(pt) {
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  const scale = Math.max(W / vw, H / vh);
+  const sw = vw * scale, sh = vh * scale;
+  const ox = (W - sw) / 2, oy = (H - sh) / 2;
+  return { x: (pt.x - ox) / scale, y: (pt.y - oy) / scale };
+}
+
+function drawGlitchPanel(corners) {
+  // corners: [topLeft, topRight, bottomRight, bottomLeft] in canvas space
+  const xs = corners.map(c => c.x), ys = corners.map(c => c.y);
+  const minX = Math.max(0, Math.min(...xs)), maxX = Math.min(W, Math.max(...xs));
+  const minY = Math.max(0, Math.min(...ys)), maxY = Math.min(H, Math.max(...ys));
+  const boxW = Math.max(4, maxX - minX), boxH = Math.max(4, maxY - minY);
+
+  // sample corresponding region of the live video into a tiny buffer -> pixelation
+  const srcTL = canvasToVideo({ x: minX, y: minY });
+  const srcBR = canvasToVideo({ x: maxX, y: maxY });
+  const sw = Math.max(1, srcBR.x - srcTL.x), sh = Math.max(1, srcBR.y - srcTL.y);
+
+  try {
+    pixCtx.drawImage(video, srcTL.x, srcTL.y, sw, sh, 0, 0, PIX_COLS, PIX_ROWS);
+  } catch (e) { return; }
+
+  panelCanvas.width = boxW; panelCanvas.height = boxH;
+  panelCtx.imageSmoothingEnabled = false;
+  panelCtx.clearRect(0, 0, boxW, boxH);
+  panelCtx.drawImage(pixCanvas, 0, 0, boxW, boxH);
+
+  // desaturate + blue tint
+  panelCtx.globalCompositeOperation = 'saturation';
+  panelCtx.fillStyle = 'rgba(0,0,0,1)';
+  panelCtx.fillRect(0, 0, boxW, boxH);
+  panelCtx.globalCompositeOperation = 'multiply';
+  panelCtx.fillStyle = '#1c2ecf';
+  panelCtx.fillRect(0, 0, boxW, boxH);
+  panelCtx.globalCompositeOperation = 'screen';
+  panelCtx.fillStyle = 'rgba(30,60,255,0.35)';
+  panelCtx.fillRect(0, 0, boxW, boxH);
+  panelCtx.globalCompositeOperation = 'source-over';
+
+  // scanline / horizontal slice glitch
+  const sliceH = Math.max(2, boxH / PIX_ROWS);
+  for (let row = 0; row < PIX_ROWS; row++) {
+    if (Math.random() > 0.82) {
+      const y = row * sliceH;
+      const shift = (Math.random() - 0.5) * boxW * 0.12;
+      const sliceImg = panelCtx.getImageData(0, y, boxW, sliceH);
+      panelCtx.putImageData(sliceImg, shift, y);
+    }
+  }
+
+  // random noise blocks (white / magenta / cyan pixels)
+  const blockCount = 10 + Math.floor(Math.random() * 10);
+  for (let i = 0; i < blockCount; i++) {
+    const bw = 3 + Math.random() * 6, bh = 3 + Math.random() * 6;
+    const bx = Math.random() * (boxW - bw), by = Math.random() * (boxH - bh);
+    const r = Math.random();
+    panelCtx.fillStyle = r < 0.5 ? 'rgba(255,255,255,0.85)' : (r < 0.8 ? 'rgba(255,60,220,0.8)' : 'rgba(60,255,240,0.8)');
+    panelCtx.fillRect(bx, by, bw, bh);
+  }
+
+  // faint scanline grid overlay
+  panelCtx.strokeStyle = 'rgba(120,150,255,0.15)';
+  panelCtx.lineWidth = 1;
+  for (let y = 0; y < boxH; y += 4) {
+    panelCtx.beginPath(); panelCtx.moveTo(0, y); panelCtx.lineTo(boxW, y); panelCtx.stroke();
+  }
+
+  // clip to the quad on the main canvas and stamp the panel in
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(corners[0].x, corners[0].y);
+  for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
+  ctx.closePath();
+  ctx.clip();
+  ctx.drawImage(panelCanvas, minX, minY, boxW, boxH);
+  ctx.restore();
+
+  // border glow around the quad
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(corners[0].x, corners[0].y);
+  for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
+  ctx.closePath();
+  ctx.strokeStyle = 'rgba(120,170,255,0.9)';
+  ctx.lineWidth = 1.5;
+  ctx.shadowBlur = 12;
+  ctx.shadowColor = '#4d8cff';
+  ctx.stroke();
+  ctx.restore();
+
+  // corner markers (pulsing green squares)
+  const pulse = 6 + Math.sin(time * 6) * 1.5;
+  ctx.save();
+  ctx.fillStyle = '#39ff8a';
+  ctx.shadowBlur = 14;
+  ctx.shadowColor = '#39ff8a';
+  corners.forEach(c => {
+    ctx.fillRect(c.x - pulse / 2, c.y - pulse / 2, pulse, pulse);
+  });
+  ctx.restore();
+}
+
+function drawHandSkeleton(hand, alpha = 0.55) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  drawConnectors(ctx, hand, HAND_CONNECTIONS, { color: 'rgba(255,255,255,0.8)', lineWidth: 1.2 });
+  hand.forEach(pt => {
+    const p = toCanvas(pt);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 1.8, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+  });
+  ctx.restore();
+}
+
+function drawWristband(wrist, indexMcp) {
+  // approximate forearm direction (reverse of wrist->index_mcp), place a small dark band
+  const dx = wrist.x - indexMcp.x, dy = wrist.y - indexMcp.y;
+  const len = Math.hypot(dx, dy) || 0.001;
+  const nx = dx / len, ny = dy / len;
+  const bandCenter = { x: wrist.x + nx * 0.045, y: wrist.y + ny * 0.045 };
+  const p = toCanvas(bandCenter);
+  const angle = Math.atan2(ny, nx);
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(angle + Math.PI / 2);
+  ctx.fillStyle = 'rgba(15,15,20,0.9)';
+  ctx.fillRect(-18, -6, 36, 12);
+  ctx.restore();
+}
+
+function loop(ts) {
+  requestAnimationFrame(loop);
+  const dt = (ts - lastT) / 1000;
+  lastT = ts; time += dt;
+
+  ctx.clearRect(0, 0, W, H);
+  uiHands.innerText = currentHands.length;
+
+  if (currentHands.length >= 2) {
+    // identify left/right by x position (in normalized landmark space, pre-mirror)
+    const h1 = currentHands[0], h2 = currentHands[1];
+    const wrist1 = h1[0], wrist2 = h2[0];
+    const left = wrist1.x < wrist2.x ? h1 : h2;
+    const right = wrist1.x < wrist2.x ? h2 : h1;
+
+    const lw = toCanvas(left[0]), rw = toCanvas(right[0]);
+
+    // "up" direction estimated from wrist -> middle-finger-MCP (landmark 9) for each hand, averaged
+    const upVecFor = (hand) => {
+      const w = toCanvas(hand[0]), m = toCanvas(hand[9]);
+      const dx = w.x - m.x, dy = w.y - m.y; // reversed: points "up" from wrist through hand
+      const len = Math.hypot(dx, dy) || 1;
+      return { x: dx / len, y: dy / len };
+    };
+    const u1 = upVecFor(left), u2 = upVecFor(right);
+    const up = { x: (u1.x + u2.x) / 2, y: (u1.y + u2.y) / 2 };
+    const upLen = Math.hypot(up.x, up.y) || 1;
+    up.x /= upLen; up.y /= upLen;
+
+    const panelWidth = Math.hypot(rw.x - lw.x, rw.y - lw.y);
+    const panelHeight = Math.min(Math.max(panelWidth * 0.32, 60), 260);
+
+    const bottomLeft = lw, bottomRight = rw;
+    const topLeft = { x: lw.x + up.x * panelHeight, y: lw.y + up.y * panelHeight };
+    const topRight = { x: rw.x + up.x * panelHeight, y: rw.y + up.y * panelHeight };
+
+    drawGlitchPanel([topLeft, topRight, bottomRight, bottomLeft]);
+
+    drawHandSkeleton(left);
+    drawHandSkeleton(right);
+    drawWristband(left[0], left[9]);
+    drawWristband(right[0], right[9]);
+
+    uiPanel.innerText = 'LOCKED';
+  } else {
+    currentHands.forEach(h => drawHandSkeleton(h, 0.35));
+    uiPanel.innerText = 'SEARCHING';
+  }
+}
+
+async function initMediaPipe() {
+  const hands = new Hands({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+  });
+  hands.setOptions({
+    maxNumHands: 2,
+    modelComplexity: 1,
+    minDetectionConfidence: 0.7,
+    minTrackingConfidence: 0.7
+  });
+  hands.onResults((results) => {
+    currentHands = results.multiHandLandmarks || [];
+  });
+
+  const camera = new Camera(video, {
+    onFrame: async () => { await hands.send({ image: video }); },
+    width: 1280,
+    height: 720,
+    facingMode: 'user'
+  });
+  await camera.start();
+}
+</script>
+</body>
+</html>
