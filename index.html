@@ -118,7 +118,25 @@ document.getElementById('startBtn').addEventListener('click', async () => {
 });
 
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
-function toCanvas(p) { return { x: p.x * W, y: p.y * H }; }
+
+// Map a normalized MediaPipe landmark (0-1 relative to the camera's raw frame)
+// to actual on-screen canvas pixels, accounting for object-fit:cover
+// scaling/cropping between the camera's native resolution and the screen.
+function toCanvas(p) {
+  const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
+  const scale = Math.max(W / vw, H / vh);
+  const sw = vw * scale, sh = vh * scale;
+  const ox = (W - sw) / 2, oy = (H - sh) / 2;
+  return { x: p.x * vw * scale + ox, y: p.y * vh * scale + oy };
+}
+
+// MediaPipe's tip landmarks (4, 8) sit at the fingertip pad, slightly "inside"
+// the visual tip. Extrapolate a bit further along the last bone segment so the
+// marker lands closer to where the eye expects the actual fingertip to be.
+function extendTip(hand, jointIdx, tipIdx, factor = 0.45) {
+  const j = toCanvas(hand[jointIdx]), t = toCanvas(hand[tipIdx]);
+  return { x: t.x + (t.x - j.x) * factor, y: t.y + (t.y - j.y) * factor };
+}
 
 // map a canvas-space point to the actual source pixel coords inside the
 // <video> element, accounting for object-fit:cover scaling/cropping
@@ -268,11 +286,12 @@ function loop(ts) {
     const left = wrist1.x < wrist2.x ? h1 : h2;
     const right = wrist1.x < wrist2.x ? h2 : h1;
 
-    // corners come straight from fingertips: index tip = top corner, thumb tip = bottom corner
-    const topLeft = toCanvas(left[8]);
-    const topRight = toCanvas(right[8]);
-    const bottomRight = toCanvas(right[4]);
-    const bottomLeft = toCanvas(left[4]);
+    // corners come from fingertips (extrapolated slightly past MediaPipe's raw
+    // tip landmark so they align with the visual fingertip): index = top, thumb = bottom
+    const topLeft = extendTip(left, 6, 8);
+    const topRight = extendTip(right, 6, 8);
+    const bottomRight = extendTip(right, 3, 4);
+    const bottomLeft = extendTip(left, 3, 4);
 
     drawGlitchPanel([topLeft, topRight, bottomRight, bottomLeft]);
 
