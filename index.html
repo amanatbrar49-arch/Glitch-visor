@@ -75,7 +75,7 @@
   <div>HANDS: <span id="ui-hands">0</span></div>
   <div>PANEL: <span id="ui-panel">SEARCHING</span></div>
 </div>
-<div class="hint" id="hint">move your wrists apart / together to resize the visor</div>
+<div class="hint" id="hint">pinch thumb + index apart / together to resize the visor</div>
 
 <script>
 const video = document.getElementById('video');
@@ -271,7 +271,12 @@ function loop(ts) {
     const left = wrist1.x < wrist2.x ? h1 : h2;
     const right = wrist1.x < wrist2.x ? h2 : h1;
 
-    const lw = toCanvas(left[0]), rw = toCanvas(right[0]);
+    // anchor each hand's corner at the midpoint between thumb tip (4) and index tip (8)
+    const pinchPoint = (hand) => {
+      const t = toCanvas(hand[4]), i = toCanvas(hand[8]);
+      return { x: (t.x + i.x) / 2, y: (t.y + i.y) / 2 };
+    };
+    const lw = pinchPoint(left), rw = pinchPoint(right);
 
     // "up" direction estimated from wrist -> middle-finger-MCP (landmark 9) for each hand, averaged
     const upVecFor = (hand) => {
