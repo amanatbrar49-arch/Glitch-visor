@@ -19,7 +19,7 @@
     position:absolute; top:0; left:0;
     width:100%; height:100%;
     object-fit:cover;
-    transform:scaleX(-1); /* mirror for selfie view */
+    transform:scaleX(-1);
   }
   video { z-index:0; }
   #overlay { z-index:5; pointer-events:none; }
@@ -91,14 +91,12 @@ let W = window.innerWidth, H = window.innerHeight;
 let currentHands = [];
 let time = 0, lastT = performance.now();
 
-// low-res buffer for pixelation sampling (lower res = chunkier, more obscuring glitch)
-const PIX_COLS = 28, PIX_ROWS = 10;
+const PIX_COLS = 48, PIX_ROWS = 18;
 const pixCanvas = document.createElement('canvas');
 pixCanvas.width = PIX_COLS; pixCanvas.height = PIX_ROWS;
 const pixCtx = pixCanvas.getContext('2d');
 pixCtx.imageSmoothingEnabled = true;
 
-// scratch canvas for the panel content before clipping
 const panelCanvas = document.createElement('canvas');
 const panelCtx = panelCanvas.getContext('2d');
 
@@ -119,9 +117,6 @@ document.getElementById('startBtn').addEventListener('click', async () => {
 
 function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
-// Map a normalized MediaPipe landmark (0-1 relative to the camera's raw frame)
-// to actual on-screen canvas pixels, accounting for object-fit:cover
-// scaling/cropping between the camera's native resolution and the screen.
 function toCanvas(p) {
   const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
   const scale = Math.max(W / vw, H / vh);
@@ -130,16 +125,11 @@ function toCanvas(p) {
   return { x: p.x * vw * scale + ox, y: p.y * vh * scale + oy };
 }
 
-// MediaPipe's tip landmarks (4, 8) sit at the fingertip pad, slightly "inside"
-// the visual tip. Extrapolate a bit further along the last bone segment so the
-// marker lands closer to where the eye expects the actual fingertip to be.
 function extendTip(hand, jointIdx, tipIdx, factor = 0.45) {
   const j = toCanvas(hand[jointIdx]), t = toCanvas(hand[tipIdx]);
   return { x: t.x + (t.x - j.x) * factor, y: t.y + (t.y - j.y) * factor };
 }
 
-// map a canvas-space point to the actual source pixel coords inside the
-// <video> element, accounting for object-fit:cover scaling/cropping
 function canvasToVideo(pt) {
   const vw = video.videoWidth || 1280, vh = video.videoHeight || 720;
   const scale = Math.max(W / vw, H / vh);
@@ -149,13 +139,11 @@ function canvasToVideo(pt) {
 }
 
 function drawGlitchPanel(corners) {
-  // corners: [topLeft, topRight, bottomRight, bottomLeft] in canvas space
   const xs = corners.map(c => c.x), ys = corners.map(c => c.y);
   const minX = Math.max(0, Math.min(...xs)), maxX = Math.min(W, Math.max(...xs));
   const minY = Math.max(0, Math.min(...ys)), maxY = Math.min(H, Math.max(...ys));
   const boxW = Math.max(4, maxX - minX), boxH = Math.max(4, maxY - minY);
 
-  // sample corresponding region of the live video into a tiny buffer -> pixelation
   const srcTL = canvasToVideo({ x: minX, y: minY });
   const srcBR = canvasToVideo({ x: maxX, y: maxY });
   const sw = Math.max(1, srcBR.x - srcTL.x), sh = Math.max(1, srcBR.y - srcTL.y);
@@ -167,25 +155,16 @@ function drawGlitchPanel(corners) {
   panelCanvas.width = boxW; panelCanvas.height = boxH;
   panelCtx.imageSmoothingEnabled = false;
   panelCtx.clearRect(0, 0, boxW, boxH);
-  panelCtx.drawImage(pixCanvas, 0, 0, boxW, boxH);
 
-  // heavy blue tint — fully obscures what's underneath
-  panelCtx.globalCompositeOperation = 'saturation';
-  panelCtx.fillStyle = 'rgba(0,0,0,1)';
-  panelCtx.fillRect(0, 0, boxW, boxH);
-  panelCtx.globalCompositeOperation = 'multiply';
-  panelCtx.fillStyle = '#1c2ecf';
-  panelCtx.fillRect(0, 0, boxW, boxH);
-  panelCtx.globalCompositeOperation = 'screen';
-  panelCtx.fillStyle = 'rgba(30,60,255,0.35)';
+  panelCtx.filter = 'grayscale(1) contrast(1.7) brightness(1.15)';
+  panelCtx.drawImage(pixCanvas, 0, 0, boxW, boxH);
+  panelCtx.filter = 'none';
+
+  panelCtx.globalCompositeOperation = 'destination-over';
+  panelCtx.fillStyle = '#000000';
   panelCtx.fillRect(0, 0, boxW, boxH);
   panelCtx.globalCompositeOperation = 'source-over';
 
-  // extra flattening pass — mutes remaining contrast so facial detail reads less clearly
-  panelCtx.fillStyle = 'rgba(20,35,150,0.42)';
-  panelCtx.fillRect(0, 0, boxW, boxH);
-
-  // scanline / horizontal slice glitch
   const sliceH = Math.max(2, boxH / PIX_ROWS);
   for (let row = 0; row < PIX_ROWS; row++) {
     if (Math.random() > 0.82) {
@@ -196,24 +175,28 @@ function drawGlitchPanel(corners) {
     }
   }
 
-  // dense random noise blocks (white / magenta / cyan pixels)
-  const blockCount = 10 + Math.floor(Math.random() * 10);
+  const blockCount = 45 + Math.floor(Math.random() * 35);
   for (let i = 0; i < blockCount; i++) {
     const bw = 3 + Math.random() * 6, bh = 3 + Math.random() * 6;
     const bx = Math.random() * (boxW - bw), by = Math.random() * (boxH - bh);
     const r = Math.random();
-    panelCtx.fillStyle = r < 0.5 ? 'rgba(255,255,255,0.85)' : (r < 0.8 ? 'rgba(255,60,220,0.8)' : 'rgba(60,255,240,0.8)');
+    if (r < 0.75) {
+      const g = 200 + Math.floor(Math.random() * 55);
+      panelCtx.fillStyle = `rgb(${g},${g},${g})`;
+    } else if (r < 0.9) {
+      panelCtx.fillStyle = '#ff3cdc';
+    } else {
+      panelCtx.fillStyle = '#3cfff0';
+    }
     panelCtx.fillRect(bx, by, bw, bh);
   }
 
-  // scanline grid overlay
-  panelCtx.strokeStyle = 'rgba(120,150,255,0.15)';
+  panelCtx.strokeStyle = 'rgba(255,255,255,0.12)';
   panelCtx.lineWidth = 1;
   for (let y = 0; y < boxH; y += 4) {
     panelCtx.beginPath(); panelCtx.moveTo(0, y); panelCtx.lineTo(boxW, y); panelCtx.stroke();
   }
 
-  // clip to the quad on the main canvas and stamp the panel in
   ctx.save();
   ctx.beginPath();
   ctx.moveTo(corners[0].x, corners[0].y);
@@ -223,20 +206,18 @@ function drawGlitchPanel(corners) {
   ctx.drawImage(panelCanvas, minX, minY, boxW, boxH);
   ctx.restore();
 
-  // border glow around the quad
   ctx.save();
   ctx.beginPath();
   ctx.moveTo(corners[0].x, corners[0].y);
   for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
   ctx.closePath();
-  ctx.strokeStyle = 'rgba(120,170,255,0.9)';
-  ctx.lineWidth = 1.5;
-  ctx.shadowBlur = 12;
-  ctx.shadowColor = '#4d8cff';
+  ctx.strokeStyle = '#4dfcff';
+  ctx.lineWidth = 2;
+  ctx.shadowBlur = 16;
+  ctx.shadowColor = '#4dfcff';
   ctx.stroke();
   ctx.restore();
 
-  // corner markers (pulsing green squares)
   const pulse = 6 + Math.sin(time * 6) * 1.5;
   ctx.save();
   ctx.fillStyle = '#39ff8a';
@@ -263,7 +244,6 @@ function drawHandSkeleton(hand, alpha = 0.55) {
 }
 
 function drawWristband(wrist, indexMcp) {
-  // approximate forearm direction (reverse of wrist->index_mcp), place a small dark band
   const dx = wrist.x - indexMcp.x, dy = wrist.y - indexMcp.y;
   const len = Math.hypot(dx, dy) || 0.001;
   const nx = dx / len, ny = dy / len;
@@ -287,14 +267,11 @@ function loop(ts) {
   uiHands.innerText = currentHands.length;
 
   if (currentHands.length >= 2) {
-    // identify left/right by x position (in normalized landmark space, pre-mirror)
     const h1 = currentHands[0], h2 = currentHands[1];
     const wrist1 = h1[0], wrist2 = h2[0];
     const left = wrist1.x < wrist2.x ? h1 : h2;
     const right = wrist1.x < wrist2.x ? h2 : h1;
 
-    // corners come from fingertips (extrapolated slightly past MediaPipe's raw
-    // tip landmark so they align with the visual fingertip): index = top, thumb = bottom
     const topLeft = extendTip(left, 6, 8);
     const topRight = extendTip(right, 6, 8);
     const bottomRight = extendTip(right, 3, 4);
