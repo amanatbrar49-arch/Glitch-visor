@@ -183,11 +183,22 @@ function drawGlitchPanel(corners) {
   panelCanvas.width = boxW; panelCanvas.height = boxH;
   panelCtx.imageSmoothingEnabled = false;
   panelCtx.clearRect(0, 0, boxW, boxH);
-
-  panelCtx.filter = 'grayscale(1) contrast(1.7) brightness(1.15)';
   panelCtx.drawImage(pixCanvas, 0, 0, boxW, boxH);
-  panelCtx.filter = 'none';
 
+  // blue x-ray tint — desaturate then push toward deep blue
+  panelCtx.globalCompositeOperation = 'saturation';
+  panelCtx.fillStyle = 'rgba(0,0,0,1)';
+  panelCtx.fillRect(0, 0, boxW, boxH);
+  panelCtx.globalCompositeOperation = 'multiply';
+  panelCtx.fillStyle = '#1c2ecf';
+  panelCtx.fillRect(0, 0, boxW, boxH);
+  panelCtx.globalCompositeOperation = 'screen';
+  panelCtx.fillStyle = 'rgba(30,60,255,0.35)';
+  panelCtx.fillRect(0, 0, boxW, boxH);
+  panelCtx.globalCompositeOperation = 'source-over';
+
+  // solid black backing stamped underneath via destination-over so the
+  // panel reads as 100% opaque even where the pixelated frame has gaps
   panelCtx.globalCompositeOperation = 'destination-over';
   panelCtx.fillStyle = '#000000';
   panelCtx.fillRect(0, 0, boxW, boxH);
@@ -245,13 +256,11 @@ function drawGlitchPanel(corners) {
 
   // corners = [A(topLeft/left-index), B(topRight/right-index), C(bottomRight/right-thumb), D(bottomLeft/left-thumb)]
   const [A, B, C, D] = corners;
-  const leftFlipped = A.y > D.y;   // left hand's index is below its thumb -> flipped
-  const rightFlipped = B.y > C.y;  // right hand's index is below its thumb -> flipped
+  const leftFlipped = A.y > D.y;
+  const rightFlipped = B.y > C.y;
 
   let drewSplit = false;
   if (leftFlipped !== rightFlipped) {
-    // exactly one hand is flipped -> the quad self-intersects into a bowtie.
-    // find where the index-index edge (AB) crosses the thumb-thumb edge (CD)
     const P = segIntersect(A, B, C, D);
     if (P) {
       const backTri = leftFlipped ? [A, P, D] : [B, P, C];
